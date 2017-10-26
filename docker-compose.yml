@@ -1,0 +1,84 @@
+version: "2.3"
+services:
+
+  traefik:
+    image: "traefik:alpine"
+    command: "--debug --entryPoints='Name:http Address::80 Redirect.EntryPoint:https' --entryPoints='Name:https Address::443 TLS' --defaultentrypoints=http,https --docker --docker.watch=true --docker.exposedbydefault=false --web --acme --acme.acmelogging=true --acme.email=you@yourdomain.ovh --acme.onhostrule=true --acme.storage=/etc/acme/acme.json --acme.entrypoint=https"
+    restart: "unless-stopped"
+    mem_limit: 512M
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:z
+      - ./traefik/acme:/etc/acme:z
+    networks: 
+      lb:
+
+  db:
+    image: "postgres:alpine"
+    environment:
+      POSTGRES_DATABASE: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_ROOT_PASSWORD: PgRootPasswd
+      POSTGRES_PASSWORD: PgKcPasswd
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data:z 
+    networks:
+      - pg 
+    restart: "unless-stopped"
+    healthcheck:
+      test: 'PGPASSWORD="PgKvPasswd" psql --host 127.0.0.1 --username keycloak --dbname keycloak -c "select 1" ; [ "0" -eq "$$?" ]; echo $$?'
+      interval: 1m30s
+      timeout: 10s
+      retries: 3
+  
+  keycloak:
+    image: "jboss/keycloak:latest"
+    restart: "unless-stopped"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      KEYCLOAK_USER: yourAdminUser
+      KEYCLOAK_PASSWORD: yourAdminUserPasswd
+      KEYCLOAK_LOGLEVEL: DEBUG
+      POSTGRES_USER: keycloak
+      PROXY_ADDRESS_FORWARDING: 'true'  
+      POSTGRES_PASSWORD: PgKcPasswd
+      POSTGRES_PORT_5432_TCP_ADDR: db
+    command: ["-b", "0.0.0.0","-Dkeycloak.profile.feature.docker=enabled"]
+    labels:
+      traefik.frontend.rule: 'Host:keycloak.yourdomain.ovh'
+      traefik.port: '8080'
+      traefik.docker.network: 'keycloakregistrytuto_lb'
+      traefik.enable: 'true'
+    mem_limit: 1G
+    networks:
+      lb:
+      pg:
+
+  registry:
+    image: "registry:2"
+    restart: "unless-stopped"
+    volumes:
+      - ./data/registry:/data:z
+      - ./certs/registry_trust_chain.pem:/opt/certs/registry_trust_chain.pem:z
+    environment:
+      REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY: /data 
+      REGISTRY_AUTH_TOKEN_ROOTCERTBUNDLE: /opt/certs/registry_trust_chain.pem 
+      REGISTRY_AUTH_TOKEN_REALM: https://keycloak.yourdomain.ovh/auth/realms/docker-registry/protocol/docker-v2/auth
+      REGISTRY_AUTH_TOKEN_SERVICE: docker-registry-test
+      REGISTRY_AUTH_TOKEN_ISSUER: https://keycloak.yourdomain.ovh/auth/realms/docker-registry
+    labels:
+      traefik.backend: docker
+      traefik.frontend.rule: Host:docker.yourdomain.ovh
+      traefik.port: '5000'
+      traefik.enable: 'true'
+    networks: 
+      - lb
+    
+networks:
+  lb:
+  pg:
